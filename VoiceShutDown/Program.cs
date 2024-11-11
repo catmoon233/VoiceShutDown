@@ -1,104 +1,99 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Linq;
 using System.Speech.Recognition;
+using System.Threading;
 
 class Program
 {
+    private static SpeechRecognitionEngine recognizer;
+    private static Dictionary<string, Tuple<DateTime, DateTime>> timeSlots = new Dictionary<string, Tuple<DateTime, DateTime>>();
+    private static bool shutdownConfirmed = false;
+    private static DateTime? shutdownTime = null;
+
     static void Main(string[] args)
     {
-        // 创建一个识别引擎
-        var recognizer = new SpeechRecognitionEngine();
-
-        // 设置识别引擎的语言
+        // Initialize speech recognizer
+        recognizer = new SpeechRecognitionEngine();
         recognizer.SetInputToDefaultAudioDevice();
-        recognizer.LoadGrammar(new DictationGrammar());
 
-        // 定义命令列表
-        List<string> shutdownCommands = new List<string> { "关机", "强制关机", "取消关机" };
-        string confirmCommand = "确定关机";
+        // Add grammar
+        Choices commands = new Choices("关机", "强制关机", "确定关机", "取消关机");
+        Grammar grammar = new Grammar(new GrammarBuilder(commands));
+        recognizer.LoadGrammar(grammar);
 
-        // 定义时间段
-        List<TimeSpan[]> timeRanges = new List<TimeSpan[]>
-        {
-            new TimeSpan[] { new TimeSpan(12, 0, 0), new TimeSpan(13, 0, 0) },
-            new TimeSpan[] { new TimeSpan(9, 0, 0), new TimeSpan(9, 30, 0) },
-            new TimeSpan[] { new TimeSpan(21, 0, 0), new TimeSpan(22, 0, 0) },
-            new TimeSpan[] { new TimeSpan(17, 0, 0), new TimeSpan(18, 0, 0) }
-            // 可以继续添加更多时间段
-        };
-
-        // 添加命令识别事件
-        recognizer.SpeechRecognized += (s, e) =>
-        {
-            if (shutdownCommands.Contains(e.Result.Text))
-            {
-                Console.WriteLine("命令收到: " + e.Result.Text);
-                switch (e.Result.Text)
-                {
-                    case "关机":
-                        ScheduleShutdown(timeRanges, 5); // 5秒后关机
-                        break;
-                    case "强制关机":
-                        Console.WriteLine("请说'确定关机'来确认操作。");
-                        DateTime startTime = DateTime.Now;
-                        while ((DateTime.Now - startTime).TotalSeconds < 5)
-                        {
-                            if (recognizer.Recognize() != null && recognizer.Recognize().Text == confirmCommand)
-                            {
-                                Console.WriteLine("正在强制关机...");
-                                Process.Start("shutdown", "/s /t 0");
-                                return;
-                            }
-                        }
-                        Console.WriteLine("超时未确认，取消操作。");
-                        break;
-                    case "取消关机":
-                        CancelShutdown();
-                        break;
-                }
-            }
-        };
-
-        // 启动识别
+        recognizer.SpeechRecognized += Recognizer_SpeechRecognized;
         recognizer.RecognizeAsync(RecognizeMode.Multiple);
 
-        // 阻塞主线程以保持程序运行
-        Console.WriteLine("按任意键退出...");
-        Console.ReadKey();
+        // Define time slots
+        timeSlots.Add("Slot1", new Tuple<DateTime, DateTime>(new DateTime(2024, 11, 11, 23, 0, 0), new DateTime(2024, 11, 11, 23, 59, 59)));
+        timeSlots.Add("Slot2", new Tuple<DateTime, DateTime>(new DateTime(2024, 11, 11, 9, 0, 0), new DateTime(2024, 11, 11, 10, 0, 0)));
+
+        Console.WriteLine("Listening for commands...");
+        Console.ReadLine();
     }
 
-    static void ScheduleShutdown(List<TimeSpan[]> timeRanges, int delaySeconds)
+    private static void Recognizer_SpeechRecognized(object sender, SpeechRecognizedEventArgs e)
     {
-        // 获取当前时间
-        DateTime now = DateTime.Now;
+        string command = e.Result.Text;
 
-        // 检查当前时间是否在任何一个时间段内
-        foreach (var range in timeRanges)
+        if (command == "关机" && IsWithinTimeSlot())
         {
-            if (now.TimeOfDay >= range[0] && now.TimeOfDay < range[1])
-            {
-                Console.WriteLine($"计划在 {range[0]:hh\\:mm} 至 {range[1]:hh\\:mm} 之间关机...");
+            Console.WriteLine("Detected '关机', please confirm within 5 seconds...");
+            shutdownTime = DateTime.Now.AddSeconds(5);
+            shutdownConfirmed = false;
 
-                // 设置关机时间为5秒后
-                Process.Start("shutdown", $"/s /t {delaySeconds}");
-                return;
+            Timer timer = new Timer(CheckShutdownConfirmation, null, 5000, Timeout.Infinite);
+        }
+        else if (command == "强制关机")
+        {
+            Console.WriteLine("Detected '强制关机', please say '确定关机' to confirm.");
+            shutdownConfirmed = false;
+        }
+        else if (command == "确定关机")
+        {
+            if (shutdownTime != null && DateTime.Now <= shutdownTime)
+            {
+                Console.WriteLine("Shutdown confirmed, the system will shut down now.");
+                ExecuteShutdown();
+            }
+            else
+            {
+                Console.WriteLine("Shutdown confirmation timeout or not within valid window.");
             }
         }
-
-        Console.WriteLine("不在指定时间内，不执行关机操作。");
+        else if (command == "取消关机")
+        {
+            Console.WriteLine("Shutdown cancelled.");
+            shutdownConfirmed = false;
+            shutdownTime = null;
+        }
     }
 
-    static void CancelShutdown()
+    private static bool IsWithinTimeSlot()
     {
-        try
+        DateTime now = DateTime.Now;
+        foreach (var timeSlot in timeSlots.Values)
         {
-            Process.Start("shutdown", "/a");
-            Console.WriteLine("关机已取消。");
+            if (now >= timeSlot.Item1 && now <= timeSlot.Item2)
+                return true;
         }
-        catch (Exception ex)
+        return false;
+    }
+
+    private static void CheckShutdownConfirmation(object state)
+    {
+        if (!shutdownConfirmed && shutdownTime.HasValue && DateTime.Now > shutdownTime.Value)
         {
-            Console.WriteLine($"取消关机失败: {ex.Message}");
+            Console.WriteLine("Shutdown confirmation failed, no action taken.");
+            shutdownTime = null;
         }
+    }
+
+    private static void ExecuteShutdown()
+    {
+        Console.WriteLine("The system will shut down...");
+        // System shutdown command (e.g., PowerShell or shutdown.exe)
+        System.Diagnostics.Process.Start("shutdown", "/s /f /t 0");
     }
 }
